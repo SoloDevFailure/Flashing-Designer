@@ -2,6 +2,7 @@ import {
   ArrowLeft,
   ArrowRight,
   ChevronDown,
+  ChevronUp,
   Download,
   FlipVertical,
   Fullscreen,
@@ -17,7 +18,7 @@ import {
   Undo2,
   Upload,
 } from 'lucide-react';
-import { ChangeEvent, PointerEvent, ReactNode, RefObject, WheelEvent, useMemo, useRef, useState } from 'react';
+import { ChangeEvent, PointerEvent, ReactNode, RefObject, WheelEvent, useEffect, useMemo, useRef, useState } from 'react';
 import {
   angleBetween,
   makeSegment,
@@ -51,12 +52,25 @@ export default function App() {
   const [future, setFuture] = useState<Profile[]>([]);
   const [draftPoint, setDraftPoint] = useState<Point | null>(null);
   const [isPanning, setIsPanning] = useState(false);
+  const [sheetOpen, setSheetOpen] = useState(true);
   const lastPan = useRef<Point | null>(null);
+  const lastPinchDist = useRef<number | null>(null);
   const drawStart = useRef<Point | null>(null);
   const svgRef = useRef<SVGSVGElement | null>(null);
+  const didFitRef = useRef(false);
 
   const selectedSegment = profile.segments[selectedIndex] ?? profile.segments[0];
   const warnings = useMemo(() => getWarnings(profile), [profile]);
+
+  // Fit to drawing on first render once the SVG has size
+  useEffect(() => {
+    if (didFitRef.current) return;
+    const id = setTimeout(() => {
+      fitToDrawing();
+      didFitRef.current = true;
+    }, 120);
+    return () => clearTimeout(id);
+  }, []);
 
   function commit(nextProfile: Profile) {
     setHistory((items) => [...items.slice(-30), profile]);
@@ -102,6 +116,12 @@ export default function App() {
 
     if (event.pointerType === 'mouse' && event.button === 1) {
       event.preventDefault();
+      setIsPanning(true);
+      lastPan.current = { x: event.clientX, y: event.clientY };
+      return;
+    }
+
+    if (event.pointerType === 'mouse' && event.button === 0 && event.altKey) {
       setIsPanning(true);
       lastPan.current = { x: event.clientX, y: event.clientY };
       return;
@@ -162,6 +182,40 @@ export default function App() {
     setDraftPoint(null);
     setIsPanning(false);
     lastPan.current = null;
+  }
+
+  // Pinch-to-zoom on touch
+  function onWorkspaceTouchMove(event: React.TouchEvent<SVGSVGElement>) {
+    if (event.touches.length !== 2) {
+      lastPinchDist.current = null;
+      return;
+    }
+    event.preventDefault();
+    const t0 = event.touches[0];
+    const t1 = event.touches[1];
+    const dist = Math.hypot(t1.clientX - t0.clientX, t1.clientY - t0.clientY);
+    const midX = (t0.clientX + t1.clientX) / 2;
+    const midY = (t0.clientY + t1.clientY) / 2;
+
+    if (lastPinchDist.current !== null) {
+      const factor = dist / lastPinchDist.current;
+      const rect = svgRef.current?.getBoundingClientRect();
+      if (rect) {
+        const screenX = midX - rect.left - rect.width / 2;
+        const screenY = midY - rect.top - rect.height / 2;
+        setCamera((current) => {
+          const nextScale = Math.max(0.35, Math.min(5, current.scale * factor));
+          const worldX = (screenX - current.x) / current.scale;
+          const worldY = (screenY - current.y) / current.scale;
+          return {
+            scale: nextScale,
+            x: screenX - worldX * nextScale,
+            y: screenY - worldY * nextScale,
+          };
+        });
+      }
+    }
+    lastPinchDist.current = dist;
   }
 
   function onWorkspaceWheel(event: WheelEvent<SVGSVGElement>) {
@@ -305,7 +359,7 @@ export default function App() {
               <label className="flex items-center gap-2 text-lg font-bold md:text-xl">
                 <select
                   value={profile.name}
-                  onChange={(event) => commit(createProfile(event.target.value))}
+                  onChange={(event) => { commit(createProfile(event.target.value)); didFitRef.current = false; setTimeout(fitToDrawing, 80); }}
                   className="max-w-full appearance-none truncate bg-transparent pr-1 outline-none"
                 >
                   {templateNames.map((name) => <option key={name}>{name}</option>)}
@@ -344,6 +398,7 @@ export default function App() {
             onPointerDown={onWorkspacePointerDown}
             onPointerMove={onWorkspacePointerMove}
             onPointerUp={onWorkspacePointerUp}
+            onTouchMove={onWorkspaceTouchMove}
             onWheel={onWorkspaceWheel}
             profile={profile}
             selectedIndex={selectedIndex}
@@ -358,14 +413,14 @@ export default function App() {
             <ToolButton active={mode === 'delete'} icon={<Trash2 />} label="Delete" onClick={deleteSegment} />
           </div>
 
-          <div className="absolute bottom-[15rem] left-4 z-10 flex flex-col gap-2 rounded-2xl bg-white p-2 shadow-soft md:bottom-8">
-            <button onClick={() => zoom(0.2)} className="touch-button rounded-xl bg-slate-50 text-2xl">+</button>
-            <button onClick={() => zoom(-0.2)} className="touch-button rounded-xl bg-slate-50 text-2xl">-</button>
+          <div className="absolute bottom-4 left-4 z-10 flex flex-col gap-2 rounded-2xl bg-white p-2 shadow-soft">
+            <button onClick={() => zoom(0.2)} className="touch-button rounded-xl bg-slate-50 text-2xl font-bold">+</button>
+            <button onClick={() => zoom(-0.2)} className="touch-button rounded-xl bg-slate-50 text-2xl font-bold">-</button>
             <button onClick={fitToDrawing} className="touch-button rounded-xl bg-slate-50"><Fullscreen /></button>
           </div>
 
-          <div className="pointer-events-none absolute bottom-[18.5rem] left-1/2 hidden -translate-x-1/2 rounded-xl bg-white px-5 py-3 text-slate-700 shadow-soft sm:block">
-            Tap a segment to edit
+          <div className="pointer-events-none absolute bottom-4 left-1/2 hidden -translate-x-1/2 rounded-xl bg-white px-5 py-3 text-slate-700 shadow-soft sm:block">
+            {mode === 'move' ? 'Drag to pan · Pinch to zoom' : 'Tap a segment to edit · Move tool to pan'}
           </div>
         </div>
 
@@ -375,6 +430,8 @@ export default function App() {
           flipSegment={flipSegment}
           loadJson={loadJson}
           mode={mode}
+          open={sheetOpen}
+          onToggle={() => setSheetOpen((v) => !v)}
           profile={profile}
           saveJson={saveJson}
           selectedIndex={selectedIndex}
@@ -401,6 +458,7 @@ function Workspace({
   onPointerDown,
   onPointerMove,
   onPointerUp,
+  onTouchMove,
   onWheel,
   profile,
   selectedIndex,
@@ -414,6 +472,7 @@ function Workspace({
   onPointerDown: (event: PointerEvent<SVGSVGElement>) => void;
   onPointerMove: (event: PointerEvent<SVGSVGElement>) => void;
   onPointerUp: (event: PointerEvent<SVGSVGElement>) => void;
+  onTouchMove: (event: React.TouchEvent<SVGSVGElement>) => void;
   onWheel: (event: WheelEvent<SVGSVGElement>) => void;
   profile: Profile;
   selectedIndex: number;
@@ -433,6 +492,7 @@ function Workspace({
       onPointerUp={onPointerUp}
       onPointerCancel={onPointerUp}
       onWheel={onWheel}
+      onTouchMove={onTouchMove}
       onAuxClick={(event) => event.preventDefault()}
     >
       <defs>
@@ -520,6 +580,8 @@ function BottomSheet({
   flipSegment,
   loadJson,
   mode,
+  open,
+  onToggle,
   profile,
   saveJson,
   selectedIndex,
@@ -538,6 +600,8 @@ function BottomSheet({
   flipSegment: () => void;
   loadJson: (event: ChangeEvent<HTMLInputElement>) => void;
   mode: ToolMode;
+  open: boolean;
+  onToggle: () => void;
   profile: Profile;
   saveJson: () => void;
   selectedIndex: number;
@@ -552,81 +616,95 @@ function BottomSheet({
   warnings: string[];
 }) {
   return (
-    <aside className="safe-bottom z-30 max-h-[48vh] overflow-y-auto rounded-t-[2rem] bg-white px-5 pt-3 shadow-soft md:grid md:max-h-none md:grid-cols-[1.1fr_0.9fr] md:gap-6 md:overflow-visible md:rounded-none md:border-t md:border-slate-200 md:px-8">
-      <div className="mx-auto mb-4 h-1.5 w-14 rounded-full bg-slate-300 md:hidden" />
-      <div>
-        <div className="mb-5 flex items-center gap-4">
-          <div className="flex-1">
-            <h2 className="text-xl font-bold">Segment {selectedIndex + 1} <span className="ml-2 text-sm font-medium text-slate-500">of {profile.segments.length}</span></h2>
+    <aside className="safe-bottom z-30 rounded-t-[2rem] bg-white shadow-soft md:rounded-none md:border-t md:border-slate-200">
+      {/* Drag handle / toggle bar */}
+      <button
+        onClick={onToggle}
+        className="flex w-full items-center justify-between px-5 py-3 md:hidden"
+        aria-label={open ? 'Collapse panel' : 'Expand panel'}
+      >
+        <div className="mx-auto h-1.5 w-14 rounded-full bg-slate-300" />
+        <span className="absolute right-5 text-slate-400">
+          {open ? <ChevronDown size={20} /> : <ChevronUp size={20} />}
+        </span>
+      </button>
+
+      {/* Collapsible content */}
+      <div className={`overflow-hidden transition-all duration-300 ${open ? 'max-h-[60vh] overflow-y-auto' : 'max-h-0'} md:max-h-none md:overflow-visible md:grid md:grid-cols-[1.1fr_0.9fr] md:gap-6 md:px-8 md:pb-6`}>
+        <div className="px-5 md:px-0">
+          <div className="mb-5 flex items-center gap-4">
+            <div className="flex-1">
+              <h2 className="text-xl font-bold">Segment {selectedIndex + 1} <span className="ml-2 text-sm font-medium text-slate-500">of {profile.segments.length}</span></h2>
+            </div>
+            <button onClick={() => setSelectedIndex(Math.max(0, selectedIndex - 1))} className="touch-button rounded-xl border border-slate-200"><ArrowLeft /></button>
+            <button onClick={() => setSelectedIndex(Math.min(profile.segments.length - 1, selectedIndex + 1))} className="touch-button rounded-xl border border-slate-200"><ArrowRight /></button>
           </div>
-          <button onClick={() => setSelectedIndex(Math.max(0, selectedIndex - 1))} className="touch-button rounded-xl border border-slate-200"><ArrowLeft /></button>
-          <button onClick={() => setSelectedIndex(Math.min(profile.segments.length - 1, selectedIndex + 1))} className="touch-button rounded-xl border border-slate-200"><ArrowRight /></button>
+
+          {selectedSegment && (
+            <div className="grid grid-cols-3 gap-3">
+              <Field label="Length">
+                <input value={selectedSegment.length} onChange={(event) => updateSegment({ length: Number(event.target.value) })} type="number" className="w-full rounded-xl border border-slate-200 px-4 py-3 text-xl outline-brand" />
+              </Field>
+              <Field label="Angle">
+                <input value={selectedSegment.angle} onChange={(event) => updateSegment({ angle: Number(event.target.value) })} type="number" className="w-full rounded-xl border border-slate-200 px-4 py-3 text-xl outline-brand" />
+              </Field>
+              <Field label="Fold">
+                <select value={selectedSegment.foldType} onChange={(event) => updateSegment({ foldType: event.target.value as Segment['foldType'] })} className="w-full rounded-xl border border-slate-200 px-3 py-3 text-base outline-brand">
+                  {foldTypes.map((fold) => <option key={fold}>{fold}</option>)}
+                </select>
+              </Field>
+            </div>
+          )}
+
+          <div className="mt-5 grid grid-cols-3 gap-3">
+            <button onClick={flipSegment} className="touch-button rounded-xl border border-slate-200 px-3 py-3 font-medium"><FlipVertical className="mx-auto mb-1" />Flip</button>
+            <button onClick={splitSegment} className="touch-button rounded-xl border border-slate-200 px-3 py-3 font-medium"><Scissors className="mx-auto mb-1" />Split</button>
+            <button onClick={deleteSegment} className="touch-button rounded-xl border border-red-200 px-3 py-3 font-medium text-red-600"><Trash2 className="mx-auto mb-1" />Delete</button>
+          </div>
+
+          <div className="mt-5 grid grid-cols-4 gap-3 border-t border-slate-100 pt-4 text-sm">
+            <Metric label="Total" value={`${totalLength(profile)} mm`} />
+            <Metric label="Bends" value={`${Math.max(0, profile.segments.length - 1)}`} />
+            <Metric label="Min. fold" value="8 mm" />
+            <Metric label="Tolerance" value="±2 mm" />
+          </div>
         </div>
 
-        {selectedSegment && (
-          <div className="grid grid-cols-3 gap-3">
-            <Field label="Length">
-              <input value={selectedSegment.length} onChange={(event) => updateSegment({ length: Number(event.target.value) })} type="number" className="w-full rounded-xl border border-slate-200 px-4 py-3 text-xl outline-brand" />
-            </Field>
-            <Field label="Angle">
-              <input value={selectedSegment.angle} onChange={(event) => updateSegment({ angle: Number(event.target.value) })} type="number" className="w-full rounded-xl border border-slate-200 px-4 py-3 text-xl outline-brand" />
-            </Field>
-            <Field label="Fold">
-              <select value={selectedSegment.foldType} onChange={(event) => updateSegment({ foldType: event.target.value as Segment['foldType'] })} className="w-full rounded-xl border border-slate-200 px-3 py-3 text-base outline-brand">
-                {foldTypes.map((fold) => <option key={fold}>{fold}</option>)}
+        <div className="mt-5 px-5 pb-4 md:mt-0 md:px-0">
+          <div className="grid grid-cols-5 gap-1 rounded-2xl bg-slate-50 p-1">
+            <NavButton active={mode === 'draw'} icon={<Pencil />} label="Draw" onClick={() => setMode('draw')} />
+            <NavButton active={mode === 'edit'} icon={<Settings2 />} label="Edit" onClick={() => setMode('edit')} />
+            <NavButton active={false} icon={<Plus />} label="Add Bend" onClick={() => setMode('draw')} />
+            <NavButton active={snapEnabled} icon={<Settings2 />} label="Snap" onClick={toggleSnap} />
+            <NavButton active={false} icon={<Upload />} label="Export" onClick={() => exportImage('png')} />
+          </div>
+
+          <div className="mt-4 grid grid-cols-2 gap-3">
+            <Field label="Material">
+              <select value={profile.material} onChange={(event) => setProfile({ ...profile, material: event.target.value })} className="w-full rounded-xl border border-slate-200 px-3 py-3 outline-brand">
+                {materials.map((material) => <option key={material}>{material}</option>)}
               </select>
             </Field>
+            <Field label="Thickness">
+              <input value={profile.thickness} onChange={(event) => setProfile({ ...profile, thickness: Number(event.target.value) })} type="number" step="0.01" className="w-full rounded-xl border border-slate-200 px-4 py-3 outline-brand" />
+            </Field>
           </div>
-        )}
 
-        <div className="mt-5 grid grid-cols-3 gap-3">
-          <button onClick={flipSegment} className="touch-button rounded-xl border border-slate-200 px-3 py-3 font-medium"><FlipVertical className="mx-auto mb-1" />Flip</button>
-          <button onClick={splitSegment} className="touch-button rounded-xl border border-slate-200 px-3 py-3 font-medium"><Scissors className="mx-auto mb-1" />Split</button>
-          <button onClick={deleteSegment} className="touch-button rounded-xl border border-red-200 px-3 py-3 font-medium text-red-600"><Trash2 className="mx-auto mb-1" />Delete</button>
-        </div>
-
-        <div className="mt-5 grid grid-cols-4 gap-3 border-t border-slate-100 pt-4 text-sm">
-          <Metric label="Total" value={`${totalLength(profile)} mm`} />
-          <Metric label="Bends" value={`${Math.max(0, profile.segments.length - 1)}`} />
-          <Metric label="Min. fold" value="8 mm" />
-          <Metric label="Tolerance" value="±2 mm" />
-        </div>
-      </div>
-
-      <div className="mt-5 md:mt-0">
-        <div className="grid grid-cols-5 gap-1 rounded-2xl bg-slate-50 p-1">
-          <NavButton active={mode === 'draw'} icon={<Pencil />} label="Draw" onClick={() => setMode('draw')} />
-          <NavButton active={mode === 'edit'} icon={<Settings2 />} label="Edit" onClick={() => setMode('edit')} />
-          <NavButton active={false} icon={<Plus />} label="Add Bend" onClick={() => setMode('draw')} />
-          <NavButton active={snapEnabled} icon={<Settings2 />} label="Snap" onClick={toggleSnap} />
-          <NavButton active={false} icon={<Upload />} label="Export" onClick={() => exportImage('png')} />
-        </div>
-
-        <div className="mt-4 grid grid-cols-2 gap-3">
-          <Field label="Material">
-            <select value={profile.material} onChange={(event) => setProfile({ ...profile, material: event.target.value })} className="w-full rounded-xl border border-slate-200 px-3 py-3 outline-brand">
-              {materials.map((material) => <option key={material}>{material}</option>)}
-            </select>
-          </Field>
-          <Field label="Thickness">
-            <input value={profile.thickness} onChange={(event) => setProfile({ ...profile, thickness: Number(event.target.value) })} type="number" step="0.01" className="w-full rounded-xl border border-slate-200 px-4 py-3 outline-brand" />
-          </Field>
-        </div>
-
-        <div className="mt-4 flex flex-wrap gap-2">
-          <button onClick={saveJson} className="touch-button rounded-xl border border-slate-200 px-4 font-semibold">Save JSON</button>
-          <label className="touch-button flex cursor-pointer items-center rounded-xl border border-slate-200 px-4 font-semibold">
-            Load JSON
-            <input type="file" accept="application/json" className="hidden" onChange={loadJson} />
-          </label>
-          <button onClick={() => exportImage('jpeg')} className="touch-button rounded-xl border border-slate-200 px-4 font-semibold">JPEG</button>
-        </div>
-
-        {warnings.length > 0 && (
-          <div className="mt-4 rounded-xl border border-amber-200 bg-amber-50 p-3 text-sm text-amber-900">
-            {warnings.map((warning) => <p key={warning}>{warning}</p>)}
+          <div className="mt-4 flex flex-wrap gap-2">
+            <button onClick={saveJson} className="touch-button rounded-xl border border-slate-200 px-4 font-semibold">Save JSON</button>
+            <label className="touch-button flex cursor-pointer items-center rounded-xl border border-slate-200 px-4 font-semibold">
+              Load JSON
+              <input type="file" accept="application/json" className="hidden" onChange={loadJson} />
+            </label>
+            <button onClick={() => exportImage('jpeg')} className="touch-button rounded-xl border border-slate-200 px-4 font-semibold">JPEG</button>
           </div>
-        )}
+
+          {warnings.length > 0 && (
+            <div className="mt-4 rounded-xl border border-amber-200 bg-amber-50 p-3 text-sm text-amber-900">
+              {warnings.map((warning) => <p key={warning}>{warning}</p>)}
+            </div>
+          )}
+        </div>
       </div>
     </aside>
   );
